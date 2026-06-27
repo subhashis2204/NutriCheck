@@ -15,7 +15,7 @@ function MainPage() {
   return (
     <>
       {/* <Canvas bgColor="bg-orange-100"> */}
-      <section className="grid grid-cols-2 max-h-screen">
+      <section className="grid grid-cols-2 h-[96vh]">
         <div className="padding-8 bg-orange-100 flex items-center justify-center">
           <img src={HomeImage} alt="Home" className="w-[78%]" />
         </div>
