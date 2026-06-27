@@ -1,0 +1,10 @@
+Flask
+requests
+python-dotenv
+flask-cors
+azure-ai-vision-imageanalysis
+azure-core
+langchain
+langchain-openai
+openai
+azure-cognitiveservices-speech

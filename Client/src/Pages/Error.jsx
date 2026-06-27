@@ -1,15 +1,19 @@
-import Canvas from "../components/Canvas"
-import Error from "../assets/error.svg"
+import Canvas from "../components/Canvas";
+import Error from "../assets/error.svg";
+import Navbar from "../components/Navbar";
 
 function ErrorPage() {
   return (
     <>
-      <Canvas bgColor="bg-orange-100 h-[86vh] items-center justify-center">
+      <Navbar />
+      <Canvas bgColor="bg-orange-100 h-[87vh] items-center justify-center">
         <img src={Error} alt="" className="w-40" />
-        <p className="text-md font-bold">Please upload an image of ingredient list</p>
+        <p className="text-md font-bold">
+          Please upload an image of ingredient list
+        </p>
       </Canvas>
     </>
-  )
+  );
 }
 
-export default ErrorPage
+export default ErrorPage;

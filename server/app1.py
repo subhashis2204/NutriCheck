@@ -2,13 +2,14 @@ import io
 import requests
 import os
 import json
+import re
 from flask import Flask, jsonify, request, send_file
 from dotenv import load_dotenv
 from flask_cors import CORS
 from azure.ai.vision.imageanalysis import ImageAnalysisClient
 from azure.core.credentials import AzureKeyCredential
-from langchain.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
+from langchain_openai import AzureChatOpenAI
+from langchain_core.messages import HumanMessage
 import azure.cognitiveservices.speech as speech_sdk
 
 load_dotenv()
@@ -21,8 +22,8 @@ gpt_key = os.getenv('AZURE_OPENAI_KEY')
 gpt_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
 gpt_deployment_name = os.getenv('AZURE_OPENAI_DEPLOYMENT_NAME')
 
-audio_key = os.getenv('AUDIO_KEY') 
-audio_location = os.getenv('AUDIO_LOCATION')
+audio_key = os.getenv('AUDIOKEY') 
+audio_location = os.getenv('AUDIOLOCATION')
 
 app = Flask(__name__)
 CORS(app)
@@ -34,42 +35,115 @@ image_analysis_client = ImageAnalysisClient(
 )
 
 # Initialize Azure OpenAI Chat Model
+# azure_chat_openai = AzureChatOpenAI(
+#     openai_api_base=gpt_endpoint,
+#     openai_api_key=gpt_key,
+#     deployment_name=gpt_deployment_name,
+#     openai_api_type='azure',
+#     openai_api_version='2023-05-15'
+# )
 azure_chat_openai = AzureChatOpenAI(
-    openai_api_base=gpt_endpoint,
-    openai_api_key=gpt_key,
-    deployment_name=gpt_deployment_name,
-    openai_api_type='azure',
-    openai_api_version='2023-05-15'
+    api_key=gpt_key,
+    azure_endpoint=gpt_endpoint,              # 1. Map your endpoint URL here
+    azure_deployment=gpt_deployment_name,     # 2. Map your model deployment name here
+    api_version="2024-12-01-preview",
+    temperature=0,
+    max_tokens=None,
+    timeout=None,
+    max_retries=2
 )
 
-def convert_to_grams(nutritional_breakdown, nutritionalPerSize, servingSize):
+def convert_to_common_unit_gram(nutritional_breakdown, nutritionalPerSize, servingSize):
+    print("hellow")
     processed_data = []
-    print("hello", nutritional_breakdown)
-    factor = float(servingSize.replace("g", "")) / float(nutritionalPerSize.replace("g", ""))
-    # factor = 1
-    for nutrition in nutritional_breakdown:
-        label, value = nutrition["label"], nutrition["value"]
-        if isinstance(value, str) and value:
-            value = value.lower().replace(" ", "")  # Normalize text
+    print(f"Parsing Sizes safely -> Serving: {servingSize} | Per Size: {nutritionalPerSize}")
+    
+    # Advanced parsing: Grab ONLY the digits directly preceding g, ml, or mg
+    def extract_weight_value(size_str):
+        if not size_str:
+            return None
+        # This regex looks for a number (int or float) followed optional spaces and letters like g, ml, mg, mcg
+        match = re.search(r"([0-9]*\.?[0-9]+)\s*(?:g|ml|mg|mcg|gms|ml)", str(size_str).lower())
+        if match:
+            return float(match.group(1))
         
-            # Extract numerical value
-            num_value = float(''.join(filter(lambda x: x.isdigit() or x == '.', value)))
+        # Fallback: if no units are matched, try to just find the last standalone number
+        fallback_match = re.findall(r"[0-9]*\.?[0-9]+", str(size_str))
+        if fallback_match:
+            return float(fallback_match[-1])
+        return None
 
-            # Convert based on units
-            if "mg" in value:
-                final_value = round(num_value * factor / 1000, 1)  # mg to g
-            elif "µg" in value or "mcg" in value:
-                final_value = round(num_value * factor / 1000000, 6) # µg/mcg to g
-            elif "g" in value:
-                final_value = round(num_value * factor, 1) # Already in g
-        else:
-            final_value = value  # Keep unchanged if not a string
+    serv_weight = extract_weight_value(servingSize)
+    nutr_weight = extract_weight_value(nutritionalPerSize)
+
+    # Calculate the true scale factor safely
+    if serv_weight and nutr_weight:
+        factor = serv_weight / nutr_weight
+    else:
+        factor = 1.0
+        print(f"⚠️ Falling back to factor 1.0. Could not cleanly map weights from: '{servingSize}' or '{nutritionalPerSize}'")
+
+    print(f"🎯 Calculated Scaling Factor: {factor}")
+
+    for nutrition in nutritional_breakdown:
+        label = nutrition.get("label", "").lower()
+        value = nutrition.get("value")
+        explicit_unit = str(nutrition.get("unit", "")).lower().strip()
         
+        if value is None:
+            processed_data.append({"label": label, "value": None})
+            continue
+
+        num_value = None
+        detected_unit = explicit_unit
+
+        # Case 1: Value is a string (e.g., "160mg")
+        if isinstance(value, str):
+            value_norm = value.lower().replace(" ", "")
+            try:
+                num_value = float(''.join(filter(lambda x: x.isdigit() or x == '.', value_norm)))
+            except ValueError:
+                num_value = 0.0
+
+            if not detected_unit:
+                if "mg" in value_norm:
+                    detected_unit = "mg"
+                elif "µg" in value_norm or "mcg" in value_norm:
+                    detected_unit = "mcg"
+                elif "g" in value_norm:
+                    detected_unit = "g"
+
+        # Case 2: Value is already a number
+        elif isinstance(value, (int, float)):
+            num_value = float(value)
+            if not detected_unit:
+                if label == "sodium":
+                    detected_unit = "mg"
+                elif label in ["vitamin d", "calcium"] and num_value > 10: 
+                    detected_unit = "mg"
+                else:
+                    detected_unit = "g"
+        else:
+            final_value = value
+            num_value = None
+
+        # Convert everything directly to GRAMS (g)
+        if num_value is not None:
+            scaled_value = num_value * factor
+            
+            if detected_unit == "mg":
+                final_value = round(scaled_value / 1000, 4)
+            elif detected_unit in ["µg", "mcg", "ug"]:
+                final_value = round(scaled_value / 1000000, 6)
+            else:
+                final_value = round(scaled_value, 2)
+
         if final_value != 0:
             processed_data.append({
                 "label": label,
                 "value": final_value
             })
+    print("Normalizing payload to Grams (g):", processed_data)
 
     return processed_data
 
@@ -126,6 +200,8 @@ def upload_image():
 
         extracted_text_str = "\n".join(extracted_text)
 
+        print(extracted_text_str)
+
         # Send extracted text to Azure OpenAI for formatting
         prompt = f"""
         You are a nutritionist. I will provide you with the user context (age, gender, allergies, medical conditions, etc.) and a piece of text extracted from an image. Your job is to analyze the extracted text and provide a JSON response with the format below.
@@ -137,7 +213,7 @@ def upload_image():
         - **Fill out the additives carefully ** include any emsulsifiers, extracts, raising agent or any artificial flaours** in the ingredient list
         - **Extract the dietary preferences** from the user context and include them in the response.
         - **The format of nutritional breakdown is fixed only fill the value based on the extracted text** if not available then fill value as **null**.
-        - Based on the ingredient list and the allergic items provided as input select the full ingredient name which are not suitable for the user. DO NOT COPY THE EXAMPLE LIST MAKE YOUR OWN.
+        - Based on the ingredient list and the allergic items provided as input select the full ingredient name which are not suitable for the user. Also mention any ingredient which are regulated or banned in other markets across globe. DO NOT COPY THE EXAMPLE LIST MAKE YOUR OWN.
         - Also provide the summary of the information in the summary section.
         
         ### **Input**:
@@ -199,31 +275,39 @@ def upload_image():
             "nutritionalBreakdown":[
                 {{
                     "label" : "carbohydrates",
-                    "value" : "FILL YOUR VALUE HERE"
+                    "value" : "FILL YOUR VALUE HERE",
+                    "unit"  : "FILL THE UNIT OF MEASURE"
                 }},
                 {{
                     "label" : "dietary fiber",
-                    "value" : "FILL YOUR VALUE HERE"
+                    "value" : "FILL YOUR VALUE HERE",
+                    "unit"  : "FILL THE UNIT OF MEASURE"
+
                 }},
                 {{
                     "label" : "total fat",
-                    "value" : "FILL YOUR VALUE HERE"
+                    "value" : "FILL YOUR VALUE HERE",
+                    "unit"  : "FILL THE UNIT OF MEASURE"
                 }},
                 {{
                     "label" : "protein",
-                    "value" : "FILL YOUR VALUE HERE"
+                    "value" : "FILL YOUR VALUE HERE",
+                    "unit"  : "FILL THE UNIT OF MEASURE"
                 }},
                 {{
                     "label" : "sodium",
-                    "value" : "FILL YOUR VALUE HERE"
+                    "value" : "FILL YOUR VALUE HERE",
+                    "unit"  : "FILL THE UNIT OF MEASURE"
                 }},
                 {{
                     "label" : "calcium",
-                    "value" : "FILL YOUR VALUE HERE"
+                    "value" : "FILL YOUR VALUE HERE",
+                    "unit"  : "FILL THE UNIT OF MEASURE"
                 }},
                 {{
                     "label" : "vitamin D",
-                    "value" : "FILL YOUR VALUE HERE"
+                    "value" : "FILL YOUR VALUE HERE",
+                    "unit"  : "FILL THE UNIT OF MEASURE"
                 }}
             ],
             "ingredientList": [
@@ -295,13 +379,25 @@ def upload_image():
         """
 
         # Get response from Azure OpenAI
-        response = azure_chat_openai([HumanMessage(content=prompt)])
+        # response = azure_chat_openai([HumanMessage(content=prompt)])
+        messages =  [
+                ("human", prompt)
+            ]
+
+        try :
+            response = azure_chat_openai.invoke(messages)
+        
+        except Exception as e:
+
+            print("_____", e)
+
+        # print("__________", response.content)
 
         # Parse the response into JSON
         try:
             formatted_data = json.loads(response.content)
             if "nutritionalBreakdown" in formatted_data:
-                formatted_data["nutritionalBreakdown"] = convert_to_grams(formatted_data["nutritionalBreakdown"], formatted_data["nutritionalPerSize"], formatted_data["servingSize"])
+                formatted_data["nutritionalBreakdown"] = convert_to_common_unit_gram(formatted_data["nutritionalBreakdown"], formatted_data["nutritionalPerSize"], formatted_data["servingSize"])
 
         except json.JSONDecodeError:
             return jsonify({"error": "Invalid JSON response from OpenAI"}), 500
