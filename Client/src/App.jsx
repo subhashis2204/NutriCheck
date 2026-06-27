@@ -9,8 +9,10 @@ import ImageUpload from "./Pages/ImageUpload";
 import Information from "./Pages/Info";
 import Navbar from "./components/Navbar";
 import MainPage from "./Pages/MainPage";
+import { useState } from "react";
 
 function App() {
+  const [response, setResponse] = useState(null);
   return (
     <>
       <BrowserRouter>
@@ -21,8 +23,16 @@ function App() {
           <Routes>
             <Route path="/" element={<MainPage />} />
             <Route path="/profile" element={<ProfilePage />} />
-            <Route path="/image-upload" element={<ImageUpload />} />
-            <Route path="/info" element={<Information />} />
+            <Route
+              path="/image-upload"
+              element={
+                <ImageUpload response={response} setResponse={setResponse} />
+              }
+            />
+            <Route
+              path="/info"
+              element={<Information responsedata={response} />}
+            />
           </Routes>
         </section>
       </BrowserRouter>
